@@ -15,7 +15,8 @@ import {
 } from '@/components/ui/sheet'
 import { socket } from "@/lib/socket";
 import { useRouter } from 'next/navigation'
-import { auth } from '@/lib/firebase'
+import { auth, db } from '@/lib/firebase'
+import { collection, getDocs, query, orderBy } from 'firebase/firestore'
 
 // Initialize socket connection
 
@@ -35,7 +36,13 @@ export default function Component() {
   const [isConnected, setIsConnected] = useState(false)
   const [roomId, setRoomId] = useState('room1')
   const [isLoading, setIsLoading] = useState(true)
-  const [username, setUsername] = useState<string>('Anonymous')
+  const [username, setUsername] = useState<any>({
+    name :'Anonymous',
+    userId :''
+  })
+  const [isMatching, setIsMatching] = useState(false)
+  const [isMatched, setIsMatched] = useState(false)
+  const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged((user: any) => {
@@ -46,7 +53,10 @@ export default function Component() {
       }
       
       setIsLoading(false)
-      setUsername(user.displayName || 'Anonymous')
+      setUsername({
+        name : user.displayName || 'Anonymous',
+        userId : user.uid
+      })
       socket.emit('user_login', {
         userId: user.uid,
         username: user.displayName || 'Anonymous'
@@ -57,48 +67,99 @@ export default function Component() {
   }, [router])
 
   useEffect(() => {
-    if (socket.connected) {
-      onConnect();
-      
-    }
+    const loadMessages = async () => {
+      try {
+        const messagesRef = collection(db, 'messages');
+        const snapshot = await getDocs(query(messagesRef, orderBy('timestamp', 'asc')));
 
-    function onConnect() {
+        const loadedMessages = snapshot.docs.map(doc => {
+          const data = doc.data();
+          return {
+            text: data.message,
+            sent: data.userId === username.userId,
+            timestamp: new Date(data.timestamp),
+            sender: data.userId,
+            status: data.status,
+            messageId: doc.id
+          };
+        });
+
+        setMessages(loadedMessages);
+      } catch (error) {
+        console.error('Error loading messages:', error);
+      }
+    };
+
+    if (username.userId) {
+      loadMessages();
+    }
+  }, [username.userId]);
+
+  useEffect(() => {
+    socket.on("connect", () => {
+      console.log("Socket connected:", socket.id);
       setIsConnected(true);
-      socket.on('receive_message', (data: { text: string, sender: string, timestamp: Date }) => {
-        console.log("receive_message", data);
-        setMessages(prev => [...prev, {
-          text: data.text,
-          sent: false,
-          timestamp: new Date(data.timestamp),
-          sender: data.sender
-        }]);
-      });
-    }
+    });
 
-    function onDisconnect() {
+    socket.on("disconnect", () => {
+      console.log("Socket disconnected");
       setIsConnected(false);
-    }
-
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
+    });
 
     return () => {
-      socket.off("connect", onConnect);
-      socket.off("disconnect", onDisconnect);
+      socket.off("connect");
+      socket.off("disconnect");
     };
-  }, [roomId]);
+  }, []);
+
+  useEffect(() => {
+    socket.on('waiting_match', (data) => {
+      console.log("Received waiting_match:", data);
+      setIsMatching(true);
+    });
+
+    socket.on('chat_matched', (data) => {
+      console.log("Received chat_matched:", data);
+      setIsMatching(false);
+      setIsMatched(true);
+      setCurrentRoomId(data.roomId);
+      setMessages([]);
+    });
+
+    return () => {
+      socket.off('waiting_match');
+      socket.off('chat_matched');
+    };
+  }, []);
+
+  const handleStartChat = () => {
+    console.log("Starting chat...");
+    if (!isConnected) {
+      console.log("Socket not connected!");
+      return;
+    }
+
+    setIsMatching(true);
+    socket.emit('start_chat', {
+      userId: username.userId,
+      username: username.name
+    });
+  };
 
   const sendMessage = (e: React.FormEvent) => {
     e.preventDefault()
-    if (inputMessage.trim()) {
+    if (inputMessage.trim() && currentRoomId) {
       socket.emit('send_message', {
         message: inputMessage,
+        userId: username.userId,
+        username: username.name,
+        roomId: currentRoomId
       });
       setMessages(prev => [...prev, {
         text: inputMessage,
         sent: true,
         timestamp: new Date(),
-        sender: socket.id
+        sender: username.userId
       }]);
       setInputMessage('');
     }
@@ -123,7 +184,7 @@ export default function Component() {
               <img src="https://cvnl.app/images/avatar.png" alt="Profile" />
             </Avatar>
             <div>
-              <h2 className="font-semibold">{username}</h2>
+              <h2 className="font-semibold">{username.name}</h2>
               <div className="flex gap-2 text-sm text-muted-foreground">
                 <span>906</span>
               </div>
@@ -202,37 +263,78 @@ export default function Component() {
           <h1 className="text-lg font-semibold ml-2">Chat với người lạ</h1>
         </header>
 
-        <ScrollArea className="flex-1 p-4">
-          <div className="space-y-4">
-            {messages.map((message, i) => (
-              <div
-                key={i}
-                className={`flex ${message.sent ? 'justify-end' : 'justify-start'}`}
-              >
-                <div
-                  className={`rounded-lg px-4 py-2 max-w-[70%] ${
-                    message.sent
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-muted'
-                  }`}
-                >
-                  {message.text}
+        {!isMatched ? (
+          <div className="flex-1 flex items-center justify-center">
+            <div className="text-center">
+              {!isMatching ? (
+                <div className="space-y-4">
+                  <p className="text-lg text-gray-600">
+                    Bắt đầu một cuộc trò chuyện mới
+                  </p>
+                  <Button 
+                    onClick={handleStartChat} 
+                    size="lg"
+                    className="px-8"
+                  >
+                    Bắt đầu chat
+                  </Button>
                 </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-center mb-4">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                  </div>
+                  <p className="text-lg text-gray-600">Đang tìm kiếm người chat...</p>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => {
+                      setIsMatching(false);
+                      socket.emit('cancel_matching', {
+                        userId: username.userId
+                      });
+                    }}
+                  >
+                    Hủy
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <>
+            <ScrollArea className="flex-1 p-4">
+              <div className="space-y-4">
+                {messages.map((message, i) => (
+                  <div
+                    key={i}
+                    className={`flex ${message.sent ? 'justify-end' : 'justify-start'}`}
+                  >
+                    <div
+                      className={`rounded-lg px-4 py-2 max-w-[70%] ${
+                        message.sent
+                          ? 'bg-primary text-primary-foreground'
+                          : 'bg-muted'
+                      }`}
+                    >
+                      {message.text}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </ScrollArea>
+            </ScrollArea>
 
-        <form onSubmit={sendMessage} className="border-t p-4">
-          <div className="flex gap-2">
-            <Input
-              placeholder="Ahihi..."
-              value={inputMessage}
-              onChange={e => setInputMessage(e.target.value)}
-            />
-            <Button type="submit">Send</Button>
-          </div>
-        </form>
+            <form onSubmit={sendMessage} className="border-t p-4">
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Nhập tin nhắn..."
+                  value={inputMessage}
+                  onChange={e => setInputMessage(e.target.value)}
+                />
+                <Button type="submit">Gửi</Button>
+              </div>
+            </form>
+          </>
+        )}
       </div>
     </div>
   )
