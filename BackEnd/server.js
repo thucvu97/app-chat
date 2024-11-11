@@ -25,6 +25,13 @@ const io = new Server(httpServer, {
   }
 });
 
+// Thêm helper function để tạo roomId từ 2 userID
+const createRoomId = (userId1, userId2) => {
+  // Sắp xếp userID để đảm bảo thứ tự nhất quán
+  const sortedIds = [userId1, userId2].sort();
+  return `${sortedIds[0]}-${sortedIds[1]}`;
+};
+
 // Thêm function để cleanup room và messages
 const cleanupRoomAndMessages = async (roomId) => {
   try {
@@ -73,44 +80,94 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('check_existing_room', async (userData) => {
+    try {
+      console.log('Checking existing room for user:', userData.userId);
+      const roomsRef = db.collection('rooms');
+      const snapshot = await roomsRef
+        .where('users', 'array-contains', userData.userId)
+        .where('active', '==', true)
+        .get();
+      
+      if (!snapshot.empty) {
+        // Lấy room đầu tiên tìm thấy
+        const roomDoc = snapshot.docs[0];
+        const roomData = roomDoc.data();
+        const roomId = roomDoc.id;
+        
+        console.log('Found room:', roomId, 'with users:', roomData.users);
+
+        // Kiểm tra xem room có đủ 2 người không
+        if (roomData.users.length === 2) {
+          // Join socket vào room
+          socket.join(roomId);
+          userRooms.set(socket.id, roomId);
+          
+          // Thông báo cho client
+          socket.emit('existing_room_found', {
+            roomId,
+            users: roomData.users,
+            partnerLeft: false
+          });
+
+          console.log('User', userData.userId, 'rejoined room:', roomId);
+          
+          // Thông báo cho user còn lại trong room
+          socket.to(roomId).emit('partner_rejoined', {
+            userId: userData.userId,
+            username: userData.username
+          });
+        } else {
+          console.log('Room found but missing partner');
+          socket.emit('existing_room_found', {
+            roomId,
+            partnerLeft: true
+          });
+        }
+      } else {
+        console.log('No existing room found for user:', userData.userId);
+        socket.emit('no_room_found');
+      }
+    } catch (error) {
+      console.error('Error checking existing room:', error);
+      socket.emit('error', { message: 'Error checking existing room' });
+    }
+  });
+
   // Xử lý sự kiện Start Chat
   socket.on('start_chat', async (userData) => {
     console.log('User requesting chat:', userData);
 
     if (!waitingRoom) {
-      // Nếu chưa có ai đang đợi, tạo waiting room mới
       waitingRoom = {
-        roomId: `room_${Date.now()}`,
         user1: {
           socket: socket,
           userData: userData
         }
       };
-      
-      // Thông báo cho user đang đợi
       socket.emit('waiting_match', { message: 'Đang chờ người khác...' });
-      
     } else {
-      // Nếu có người đang đợi, ghép cặp họ lại
-      const roomId = waitingRoom.roomId;
       const user1 = waitingRoom.user1;
+      const roomId = createRoomId(user1.userData.userId, userData.userId);
       
-      // Join cả 2 socket vào cùng room
       user1.socket.join(roomId);
       socket.join(roomId);
       
-      // Lưu roomId cho cả hai socket
       userRooms.set(user1.socket.id, roomId);
       userRooms.set(socket.id, roomId);
       
-      // Thông báo cho cả 2 user về việc match thành công
       io.to(roomId).emit('chat_matched', {
         roomId: roomId,
         message: 'Đã tìm thấy người chat!',
       });
 
-      // Reset waiting room
       waitingRoom = null;
+
+      await db.collection('rooms').doc(roomId).set({
+        users: [user1.userData.userId, userData.userId],
+        createdAt: new Date().toISOString(),
+        active: true
+      });
     }
   });
 
@@ -142,49 +199,38 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Xử lý disconnect
-  socket.on('disconnect', async () => {
-    try {
-      const roomId = userRooms.get(socket.id);
-      
-      if (roomId) {
-        socket.to(roomId).emit('user_disconnected', {
-          message: 'Người chat đã ngắt kết nối'
-        });
-        
-        // Cleanup room và messages
-        await cleanupRoomAndMessages(roomId);
-        
-        // Xóa thông tin roomId của socket này
-        userRooms.delete(socket.id);
-      }
-      
-      // Xóa khỏi waiting room nếu đang đợi
-      if (waitingRoom?.user1.socket.id === socket.id) {
-        if (waitingRoom.roomId) {
-          await cleanupRoomAndMessages(waitingRoom.roomId);
-        }
-        waitingRoom = null;
-      }
-    } catch (error) {
-      console.error('Error handling disconnect:', error);
-    }
-  });
-
   // Thêm xử lý khi user chủ động rời phòng
   socket.on('leave_room', async (data) => {
     try {
-      const { roomId } = data;
+      const { roomId, userId } = data;
       
-      // Thông báo cho user còn lại
+      const roomRef = db.collection('rooms').doc(roomId);
+      const roomDoc = await roomRef.get();
+      
+      if (roomDoc.exists) {
+        const roomData = roomDoc.data();
+        // Remove user khỏi mảng users
+        const updatedUsers = roomData.users.filter(id => id !== userId);
+        
+        if (updatedUsers.length === 0) {
+          // Nếu không còn user nào, deactivate room
+          await roomRef.update({
+            active: false,
+            deactivatedAt: new Date().toISOString()
+          });
+        } else {
+          // Update mảng users mới
+          await roomRef.update({
+            users: updatedUsers,
+            lastUpdated: new Date().toISOString()
+          });
+        }
+      }
+      
       socket.to(roomId).emit('user_left', {
         message: 'Người chat đã rời phòng'
       });
       
-      // Cleanup room và messages
-      await cleanupRoomAndMessages(roomId);
-      
-      // Rời khỏi room
       socket.leave(roomId);
     } catch (error) {
       console.error('Error handling leave room:', error);
