@@ -24,6 +24,35 @@ const io = new Server(httpServer, {
   }
 });
 
+// Thêm function để cleanup room và messages
+const cleanupRoomAndMessages = async (roomId) => {
+  try {
+    console.log(`Cleaning up room ${roomId} and related messages`);
+    
+    // Xóa messages của room
+    const messagesRef = db.collection('messages');
+    const messageSnapshot = await messagesRef
+      .where('roomId', '==', roomId)
+      .get();
+    
+    // Batch delete messages
+    const batch = db.batch();
+    messageSnapshot.docs.forEach((doc) => {
+      batch.delete(doc.ref);
+    });
+    
+    // Xóa room
+    const roomRef = db.collection('rooms').doc(roomId);
+    batch.delete(roomRef);
+    
+    // Thực hiện batch
+    await batch.commit();
+    console.log(`Cleaned up room ${roomId} and ${messageSnapshot.size} messages`);
+  } catch (error) {
+    console.error('Error cleaning up room and messages:', error);
+  }
+};
+
 io.on('connection', (socket) => {
   console.log('User connected:', socket.id);
 
@@ -82,6 +111,7 @@ io.on('connection', (socket) => {
 
   // Xử lý tin nhắn
   socket.on('send_message', async (data) => {
+    console.log("send_message", data);
     try {
       const messageData = {
         userId: data.userId,
@@ -94,7 +124,7 @@ io.on('connection', (socket) => {
       // Lưu tin nhắn vào database
       await db.collection('messages').add(messageData);
 
-      // Gửi tin nhắn đến tất cả người dùng trong room, trừ người gửi
+      // Gửi tin nhắn đến room
       socket.to(data.roomId).emit('receive_message', {
         text: data.message,
         timestamp: messageData.timestamp,
@@ -108,12 +138,60 @@ io.on('connection', (socket) => {
   });
 
   // Xử lý disconnect
-  socket.on('disconnect', () => {
-    // Nếu user đang trong waiting room disconnect
-    if (waitingRoom && waitingRoom.user1.socket.id === socket.id) {
-      waitingRoom = null;
+  socket.on('disconnect', async () => {
+    try {
+      console.log('User disconnected:', socket.id);
+      
+      // Tìm room active của user
+      const roomsRef = db.collection('rooms');
+      const snapshot = await roomsRef
+        .where('status', '==', 'active')
+        .where('users', 'array-contains', socket.id)
+        .get();
+
+      if (!snapshot.empty) {
+        const roomDoc = snapshot.docs[0];
+        const roomId = roomDoc.id;
+        
+        // Thông báo cho user còn lại trong room
+        socket.to(roomId).emit('user_disconnected', {
+          message: 'Người chat đã ngắt kết nối'
+        });
+        
+        // Cleanup room và messages
+        await cleanupRoomAndMessages(roomId);
+      }
+      
+      // Xóa khỏi waiting room nếu đang đợi
+      if (waitingRoom?.user1.socket.id === socket.id) {
+        if (waitingRoom.roomId) {
+          await cleanupRoomAndMessages(waitingRoom.roomId);
+        }
+        waitingRoom = null;
+      }
+    } catch (error) {
+      console.error('Error handling disconnect:', error);
     }
-    console.log('User disconnected:', socket.id);
+  });
+
+  // Thêm xử lý khi user chủ động rời phòng
+  socket.on('leave_room', async (data) => {
+    try {
+      const { roomId } = data;
+      
+      // Thông báo cho user còn lại
+      socket.to(roomId).emit('user_left', {
+        message: 'Người chat đã rời phòng'
+      });
+      
+      // Cleanup room và messages
+      await cleanupRoomAndMessages(roomId);
+      
+      // Rời khỏi room
+      socket.leave(roomId);
+    } catch (error) {
+      console.error('Error handling leave room:', error);
+    }
   });
 });
 

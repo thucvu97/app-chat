@@ -17,6 +17,7 @@ import { socket } from "@/lib/socket";
 import { useRouter } from 'next/navigation'
 import { auth, db } from '@/lib/firebase'
 import { collection, getDocs, query, orderBy } from 'firebase/firestore'
+import { useToast } from "@/hooks/use-toast"
 
 // Initialize socket connection
 
@@ -43,6 +44,7 @@ export default function Component() {
   const [isMatching, setIsMatching] = useState(false)
   const [isMatched, setIsMatched] = useState(false)
   const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
+  const { toast } = useToast()
 
   useEffect(() => {
     const unsubscribe = auth.onAuthStateChanged((user: any) => {
@@ -132,6 +134,59 @@ export default function Component() {
     };
   }, []);
 
+  useEffect(() => {
+    // Xử lý khi người chat còn lại disconnect
+    socket.on('user_disconnected', (data) => {
+      console.log('Chat partner disconnected:', data);
+      // Reset states
+      setIsMatched(false);
+      setCurrentRoomId(null);
+      setMessages([]);
+      // Hiển thị thông báo
+      toast({
+        title: "Thông báo",
+        description: "Người chat đã ngắt kết nối",
+        status: "info",
+      });
+    });
+
+    // Xử lý khi người chat rời phòng
+    socket.on('user_left', (data) => {
+      console.log('Chat partner left:', data);
+      // Reset states
+      setIsMatched(false);
+      setCurrentRoomId(null);
+      setMessages([]);
+      // Hiển thị thông báo
+      toast({
+        title: "Thông báo",
+        description: "Người chat đã rời phòng",
+        status: "info",
+      });
+    });
+
+    return () => {
+      socket.off('user_disconnected');
+      socket.off('user_left');
+    };
+  }, []);
+
+  useEffect(() => {
+    socket.on('receive_message', (data) => {
+      console.log("Received message:", data);
+      setMessages(prev => [...prev, {
+        text: data.text,
+        sent: false,
+        timestamp: new Date(data.timestamp),
+        sender: data.sender
+      }]);
+    });
+
+    return () => {
+      socket.off('receive_message');
+    };
+  }, []);
+
   const handleStartChat = () => {
     console.log("Starting chat...");
     if (!isConnected) {
@@ -169,6 +224,16 @@ export default function Component() {
     auth.signOut()
     router.push('/login')
   }
+
+  // Thêm function để rời phòng chủ động
+  const handleLeaveRoom = () => {
+    if (currentRoomId) {
+      socket.emit('leave_room', { roomId: currentRoomId });
+      setIsMatched(false);
+      setCurrentRoomId(null);
+      setMessages([]);
+    }
+  };
 
   if (isLoading) {
     return <div className="flex h-screen items-center justify-center">Loading...</div>
@@ -325,6 +390,15 @@ export default function Component() {
 
             <form onSubmit={sendMessage} className="border-t p-4">
               <div className="flex gap-2">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="rounded-full hover:bg-red-100"
+                  onClick={handleLeaveRoom}
+                >
+                  <LogOut className="h-4 w-4 text-red-500" />
+                </Button>
                 <Input
                   placeholder="Nhập tin nhắn..."
                   value={inputMessage}
