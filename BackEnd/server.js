@@ -11,8 +11,9 @@ const httpServer = createServer(app);
 
 app.use(cors());
 
-// Thêm biến để quản lý waiting room
+// Thêm biến để quản lý waiting room và socket rooms
 let waitingRoom = null;
+const userRooms = new Map();
 
 // Cấu hình Socket.IO đơn giản nhất
 const io = new Server(httpServer, {
@@ -98,6 +99,10 @@ io.on('connection', (socket) => {
       user1.socket.join(roomId);
       socket.join(roomId);
       
+      // Lưu roomId cho cả hai socket
+      userRooms.set(user1.socket.id, roomId);
+      userRooms.set(socket.id, roomId);
+      
       // Thông báo cho cả 2 user về việc match thành công
       io.to(roomId).emit('chat_matched', {
         roomId: roomId,
@@ -140,26 +145,18 @@ io.on('connection', (socket) => {
   // Xử lý disconnect
   socket.on('disconnect', async () => {
     try {
-      console.log('User disconnected:', socket.id);
+      const roomId = userRooms.get(socket.id);
       
-      // Tìm room active của user
-      const roomsRef = db.collection('rooms');
-      const snapshot = await roomsRef
-        .where('status', '==', 'active')
-        .where('users', 'array-contains', socket.id)
-        .get();
-
-      if (!snapshot.empty) {
-        const roomDoc = snapshot.docs[0];
-        const roomId = roomDoc.id;
-        
-        // Thông báo cho user còn lại trong room
+      if (roomId) {
         socket.to(roomId).emit('user_disconnected', {
           message: 'Người chat đã ngắt kết nối'
         });
         
         // Cleanup room và messages
         await cleanupRoomAndMessages(roomId);
+        
+        // Xóa thông tin roomId của socket này
+        userRooms.delete(socket.id);
       }
       
       // Xóa khỏi waiting room nếu đang đợi

@@ -47,8 +47,23 @@ export default function Component() {
   const { toast } = useToast()
 
   useEffect(() => {
+    // Khởi tạo socket connection ngay khi component mount
+    if (!socket.connected) {
+      socket.connect();
+    }
+
+    socket.on("connect", () => {
+      console.log("Socket connected:", socket.id);
+      setIsConnected(true);
+    });
+
+    socket.on("disconnect", () => {
+      console.log("Socket disconnected");
+      setIsConnected(false);
+    });
+
     const unsubscribe = auth.onAuthStateChanged((user: any) => {
-      console.log("current-user",user);
+      console.log("current-user", user);
       if (!user) {
         router.push('/login')
         return
@@ -56,17 +71,36 @@ export default function Component() {
       
       setIsLoading(false)
       setUsername({
-        name : user.displayName || 'Anonymous',
-        userId : user.uid
+        name: user.displayName || 'Anonymous',
+        userId: user.uid
       })
-      socket.emit('user_login', {
-        userId: user.uid,
-        username: user.displayName || 'Anonymous'
-      })
+
+      // Chỉ emit user_login khi socket đã connected
+      if (socket.connected) {
+        socket.emit('user_login', {
+          userId: user.uid,
+          username: user.displayName || 'Anonymous'
+        })
+      }
     })
 
-    return () => unsubscribe()
+    return () => {
+      unsubscribe()
+      socket.off("connect")
+      socket.off("disconnect")
+      socket.disconnect()
+    }
   }, [router])
+
+  // Thêm một useEffect riêng để handle user_login khi socket vừa connected
+  useEffect(() => {
+    if (isConnected && username.userId) {
+      socket.emit('user_login', {
+        userId: username.userId,
+        username: username.name
+      })
+    }
+  }, [isConnected, username])
 
   useEffect(() => {
     const loadMessages = async () => {
@@ -96,23 +130,6 @@ export default function Component() {
       loadMessages();
     }
   }, [username.userId]);
-
-  useEffect(() => {
-    socket.on("connect", () => {
-      console.log("Socket connected:", socket.id);
-      setIsConnected(true);
-    });
-
-    socket.on("disconnect", () => {
-      console.log("Socket disconnected");
-      setIsConnected(false);
-    });
-
-    return () => {
-      socket.off("connect");
-      socket.off("disconnect");
-    };
-  }, []);
 
   useEffect(() => {
     socket.on('waiting_match', (data) => {
