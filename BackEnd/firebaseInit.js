@@ -7,7 +7,6 @@ const serviceAccount = JSON.parse(readFileSync('./cert.json'));
 
 const app = initializeApp({
     credential:cert(serviceAccount),
-    databaseURL: process.env.FIREBASE_DATABASE_URL
   });
 const db = getFirestore(app);
 const auth = getAuth(app);
