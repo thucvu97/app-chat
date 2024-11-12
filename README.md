@@ -4,17 +4,17 @@
 
 ## Demo
 
-![Demo Chat App](./images/demo.gif)
+![Demo Chat App](./Images/demo.gif)
 
 ## Screenshots
 
-![Login Screen](./images/login.png)
+![Login Screen](./Images/login.png)
 *Màn hình đăng nhập với Google*
 
-![Find Match](./images/find.png)
+![Find Match](./Images/find.png)
 *Giao diện tìm kiếm người chat*
 
-![Chat Interface](./images/chat.png)
+![Chat Interface](./Images/chat.png)
 *Giao diện chat chính*
 ## Tính năng chính
 
