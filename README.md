@@ -1,6 +1,6 @@
-# Simple Chat App with Next.js and Firebase
+# Simple Chat App with Next.js and Socket.io & Firebase
 
-Ứng dụng chat đơn giản được xây dựng bằng Next.js 14 và Firebase, cho phép người dùng đăng nhập và trò chuyện realtime.
+Ứng dụng chat đơn giản được xây dựng bằng Next.js 14 và Socket.io & Firebase, cho phép người dùng đăng nhập và trò chuyện realtime.
 
 ## Demo
 
@@ -30,7 +30,3 @@
 - Firebase (Authentication, Firestore)
 - Tailwind CSS
 - TypeScript
-
-## Cài đặt
-
-1. Clone repository:
