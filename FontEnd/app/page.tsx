@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { Settings, MessageCircle, HelpCircle, Edit, LogOut } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -16,7 +16,7 @@ SheetTrigger,
 import { socket } from "@/lib/socket";
 import { useRouter } from 'next/navigation'
 import { auth, db } from '@/lib/firebase'
-import { collection, getDocs, query, orderBy, where } from 'firebase/firestore'
+import { collection, getDocs, query, orderBy, where, doc, getDoc } from 'firebase/firestore'
 import { useToast } from "@/hooks/use-toast"
 
 // Initialize socket connection
@@ -29,6 +29,8 @@ timestamp: Date
 sender?: string
 }
 
+const RECONNECT_INTERVAL = 3000; // 3 seconds
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 export default function Component() {
 const router = useRouter()
@@ -38,16 +40,46 @@ const [isConnected, setIsConnected] = useState(false)
 const [isLoading, setIsLoading] = useState(true)
 const [username, setUsername] = useState<any>({
   name :'Anonymous',
-  userId :''
+  userId :'',
+  count: 0
 })
 const [isMatching, setIsMatching] = useState(false)
 const [isMatched, setIsMatched] = useState(false)
 const [currentRoomId, setCurrentRoomId] = useState<string | null>(null)
 const { toast } = useToast()
 const [isLoadingMessages, setIsLoadingMessages] = useState(false);
+const [reconnectAttempts, setReconnectAttempts] = useState(0);
+const reconnectTimerRef = useRef<NodeJS.Timeout>();
+const [showConnectionStatus, setShowConnectionStatus] = useState(false);
+const connectionTimerRef = useRef<NodeJS.Timeout>();
 
+// Tách logic reconnect thành function riêng
+const attemptReconnect = useCallback(() => {
+  if (!socket.connected && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+    console.log(`Attempting to reconnect... (Attempt ${reconnectAttempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+    socket.connect();
+    setReconnectAttempts(prev => prev + 1);
+  }
+}, [reconnectAttempts]);
+
+// Tách ConnectionStatus thành component riêng với animation
+const ConnectionStatus = () => (
+  <div
+    className={`fixed bottom-4 left-4 flex items-center gap-2 rounded-full px-3 py-1 text-sm
+      transition-all duration-300 ease-in-out
+      ${showConnectionStatus ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-4'}
+      ${isConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}
+    `}
+  >
+    <div className={`w-2 h-2 rounded-full ${
+      isConnected ? 'bg-green-500' : 'bg-red-500'
+    }`} />
+    {isConnected ? 'Đã kết nối' : 'Đang kết nối lại...'}
+  </div>
+);
+
+// Update socket connection useEffect
 useEffect(() => {
-  // Khởi tạo socket connection ngay khi component mount
   if (!socket.connected) {
     socket.connect();
   }
@@ -55,52 +87,145 @@ useEffect(() => {
   socket.on("connect", () => {
     console.log("Socket connected:", socket.id);
     setIsConnected(true);
+    setReconnectAttempts(0);
+    
+    // Show status notification
+    setShowConnectionStatus(true);
+    // Clear any existing timers
+    if (connectionTimerRef.current) {
+      clearTimeout(connectionTimerRef.current);
+    }
+    // Hide after 2 seconds
+    connectionTimerRef.current = setTimeout(() => {
+      setShowConnectionStatus(false);
+    }, 2000);
+
+    // Clear any existing reconnect timer
+    if (reconnectTimerRef.current) {
+      clearInterval(reconnectTimerRef.current);
+      reconnectTimerRef.current = undefined;
+    }
+
+    // Re-emit user login if needed
+    if (username.userId) {
+      socket.emit('user_login', {
+        userId: username.userId,
+        username: username.name
+      });
+    }
   });
 
   socket.on("disconnect", () => {
     console.log("Socket disconnected");
     setIsConnected(false);
+    
+    // Show status notification
+    setShowConnectionStatus(true);
+    // Keep showing while disconnected
+    // Will be hidden when reconnected
+
+    // Start reconnection attempts
+    reconnectTimerRef.current = setInterval(() => {
+      attemptReconnect();
+    }, RECONNECT_INTERVAL);
+
   });
 
   socket.on("connect_error", (error) => {
     console.error("Socket connection error:", error);
-    toast({
-      title: "Lỗi kết nối",
-      description: "Không thể kết nối đến server. Vui lòng thử lại sau.",
-      variant: "destructive",
-    });
+    
+    if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      // Clear reconnect timer if max attempts reached
+      if (reconnectTimerRef.current) {
+        clearInterval(reconnectTimerRef.current);
+        reconnectTimerRef.current = undefined;
+      }
+
+      toast({
+        title: "Lỗi kết nối",
+        description: "Không thể kết nối đến server. Vui lòng tải lại trang.",
+        variant: "destructive",
+        action: (
+          <Button 
+            variant="outline" 
+            onClick={() => window.location.reload()}
+          >
+            Tải lại
+          </Button>
+        ),
+      });
+    }
   });
 
-  const unsubscribe = auth.onAuthStateChanged((user: any) => {
-    console.log("current-user", user);
+  // Cleanup function
+  return () => {
+    if (connectionTimerRef.current) {
+      clearTimeout(connectionTimerRef.current);
+    }
+    if (reconnectTimerRef.current) {
+      clearInterval(reconnectTimerRef.current);
+    }
+    socket.off("connect");
+    socket.off("disconnect");
+    socket.off("connect_error");
+    socket.disconnect();
+  };
+}, [attemptReconnect, username.userId, username.name, reconnectAttempts, toast]);
+
+// Add useEffect to handle connection status visibility
+useEffect(() => {
+  // If connected, start timer to hide status
+  if (isConnected && showConnectionStatus) {
+    connectionTimerRef.current = setTimeout(() => {
+      setShowConnectionStatus(false);
+    }, 2000);
+  }
+
+  return () => {
+    if (connectionTimerRef.current) {
+      clearTimeout(connectionTimerRef.current);
+    }
+  };
+}, [isConnected, showConnectionStatus]);
+
+useEffect(() => {
+  const unsubscribe = auth.onAuthStateChanged(async (user: any) => {
     if (!user) {
       router.push('/login')
       return
     }
     
-    setIsLoading(false)
-    setUsername({
-      name: user.displayName || 'Anonymous',
-      userId: user.uid
-    })
-
-    // Chỉ emit user_login khi socket đã connected
-    if (socket.connected) {
-      socket.emit('user_login', {
+    try {
+      // Fix: Use proper Firestore v9 syntax
+      const userDocRef = doc(db, 'users', user.uid)
+      const userDocSnap = await getDoc(userDocRef)
+      const userData = userDocSnap.data()
+      
+      setIsLoading(false)
+      setUsername({
+        name: user.displayName || 'Anonymous',
         userId: user.uid,
-        username: user.displayName || 'Anonymous'
+        count: userData?.count || 0
+      })
+
+      if (socket.connected) {
+        socket.emit('user_login', {
+          userId: user.uid,
+          username: user.displayName || 'Anonymous'
+        })
+      }
+    } catch (error) {
+      console.error('Error fetching user data:', error)
+      toast({
+        title: "Error",
+        description: "Could not load user data",
+        variant: "destructive",
       })
     }
   })
 
-  return () => {
-    unsubscribe()
-    socket.off("connect")
-    socket.off("disconnect")
-    socket.off("connect_error")
-    socket.disconnect()
-  }
-}, [router, toast])
+  return () => unsubscribe()
+}, [router])
 
 // Thêm một useEffect riêng để handle user_login khi socket vừa connected
 useEffect(() => {
@@ -196,16 +321,14 @@ useEffect(() => {
   // Xử lý khi người chat rời phòng
   socket.on('user_left', (data) => {
     console.log('Chat partner left:', data);
-    // Reset states
+    setMessages(prev => [...prev, {
+      text: "Người lạ đã thoát khỏi cuộc trò chuyện",
+      sent: false,
+      timestamp: new Date(),
+      system: true
+    }]);
+    // Don't reset room immediately, just mark as partner left
     setIsMatched(false);
-    setCurrentRoomId(null);
-    setMessages([]);
-    // Hiển thị thông báo
-    toast({
-      title: "Thông báo",
-      description: "Người chat đã rời phòng",
-      status: "info",
-    });
   });
 
   return () => {
@@ -283,6 +406,9 @@ const handleStartChat = () => {
     console.log("Socket not connected!");
     return;
   }
+  if (currentRoomId) {
+    socket.emit('cleanup_room', { roomId: currentRoomId });
+  }
 
   setIsMatching(true);
   socket.emit('start_chat', {
@@ -318,7 +444,7 @@ const handleLogout = () => {
 // Thêm function để rời phòng chủ động
 const handleLeaveRoom = () => {
   if (currentRoomId) {
-    socket.emit('leave_room', { roomId: currentRoomId });
+    socket.emit('leave_room', { roomId: currentRoomId, userId: username.userId });
     setIsMatched(false);
     setCurrentRoomId(null);
     setMessages([]);
@@ -341,7 +467,7 @@ return (
           <div>
             <h2 className="font-semibold">{username.name}</h2>
             <div className="flex gap-2 text-sm text-muted-foreground">
-              <span>906</span>
+              <span>{username.count} {username.count <= 1 ? 'match' : 'matches'}</span>
             </div>
           </div>
         </div>
@@ -506,6 +632,7 @@ return (
         </>
       )}
     </div>
+    <ConnectionStatus />
   </div>
 )
 }

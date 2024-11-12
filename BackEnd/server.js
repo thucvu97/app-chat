@@ -4,6 +4,7 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { db } from './firebaseInit.js';
+import admin from 'firebase-admin';
 dotenv.config();
 
 const app = express();
@@ -35,7 +36,7 @@ const createRoomId = (userId1, userId2) => {
 // Thêm function để cleanup room và messages
 const cleanupRoomAndMessages = async (roomId) => {
   try {
-    console.log(`Cleaning up room ${roomId} and related messages`);
+    console.log(`Starting cleanup for room ${roomId}`);
     
     // Xóa messages của room
     const messagesRef = db.collection('messages');
@@ -55,9 +56,10 @@ const cleanupRoomAndMessages = async (roomId) => {
     
     // Thực hiện batch
     await batch.commit();
-    console.log(`Cleaned up room ${roomId} and ${messageSnapshot.size} messages`);
+    console.log(`Successfully deleted room ${roomId} and ${messageSnapshot.size} messages`);
   } catch (error) {
     console.error('Error cleaning up room and messages:', error);
+    throw error; // Throw error để có thể catch ở hàm gọi
   }
 };
 
@@ -138,6 +140,12 @@ io.on('connection', (socket) => {
   socket.on('start_chat', async (userData) => {
     console.log('User requesting chat:', userData);
 
+    // Kiểm tra xem user này đã ở trong waiting room chưa
+    if (waitingRoom && waitingRoom.user1.userData.userId === userData.userId) {
+      console.log('User already in waiting room');
+      return;
+    }
+
     if (!waitingRoom) {
       waitingRoom = {
         user1: {
@@ -147,27 +155,59 @@ io.on('connection', (socket) => {
       };
       socket.emit('waiting_match', { message: 'Đang chờ người khác...' });
     } else {
-      const user1 = waitingRoom.user1;
-      const roomId = createRoomId(user1.userData.userId, userData.userId);
-      
-      user1.socket.join(roomId);
-      socket.join(roomId);
-      
-      userRooms.set(user1.socket.id, roomId);
-      userRooms.set(socket.id, roomId);
-      
-      io.to(roomId).emit('chat_matched', {
-        roomId: roomId,
-        message: 'Đã tìm thấy người chat!',
-      });
+      try {
+        // Kiểm tra để đảm bảo không match với chính mình
+        if (waitingRoom.user1.userData.userId === userData.userId) {
+          console.log('Cannot match with self');
+          return;
+        }
 
-      waitingRoom = null;
+        const user1 = waitingRoom.user1;
+        const roomId = createRoomId(user1.userData.userId, userData.userId);
+        
+        user1.socket.join(roomId);
+        socket.join(roomId);
+        
+        userRooms.set(user1.socket.id, roomId);
+        userRooms.set(socket.id, roomId);
 
-      await db.collection('rooms').doc(roomId).set({
-        users: [user1.userData.userId, userData.userId],
-        createdAt: new Date().toISOString(),
-        active: true
-      });
+        // Tạo batch để update nhiều documents cùng lúc
+        const batch = db.batch();
+
+        // Update count cho user1
+        const user1Ref = db.collection('users').doc(user1.userData.userId);
+        batch.update(user1Ref, {
+          count: admin.firestore.FieldValue.increment(1)
+        });
+
+        // Update count cho user2
+        const user2Ref = db.collection('users').doc(userData.userId);
+        batch.update(user2Ref, {
+          count: admin.firestore.FieldValue.increment(1)
+        });
+
+        // Lưu room
+        const roomRef = db.collection('rooms').doc(roomId);
+        batch.set(roomRef, {
+          users: [user1.userData.userId, userData.userId],
+          createdAt: new Date().toISOString(),
+          active: true
+        });
+
+        // Thực hiện tất cả updates
+        await batch.commit();
+        
+        io.to(roomId).emit('chat_matched', {
+          roomId: roomId,
+          message: 'Đã tìm thấy người chat!',
+        });
+
+        // Reset waiting room
+        waitingRoom = null;
+      } catch (error) {
+        console.error('Error in start_chat:', error);
+        socket.emit('error', { message: 'Error starting chat' });
+      }
     }
   });
 
@@ -203,35 +243,21 @@ io.on('connection', (socket) => {
   socket.on('leave_room', async (data) => {
     try {
       const { roomId, userId } = data;
+      console.log(`User ${userId} leaving room ${roomId}`);
       
-      const roomRef = db.collection('rooms').doc(roomId);
-      const roomDoc = await roomRef.get();
-      
-      if (roomDoc.exists) {
-        const roomData = roomDoc.data();
-        // Remove user khỏi mảng users
-        const updatedUsers = roomData.users.filter(id => id !== userId);
-        
-        if (updatedUsers.length === 0) {
-          // Nếu không còn user nào, deactivate room
-          await roomRef.update({
-            active: false,
-            deactivatedAt: new Date().toISOString()
-          });
-        } else {
-          // Update mảng users mới
-          await roomRef.update({
-            users: updatedUsers,
-            lastUpdated: new Date().toISOString()
-          });
-        }
-      }
-      
+      // Thông báo cho user còn lại trước khi xóa room
       socket.to(roomId).emit('user_left', {
         message: 'Người chat đã rời phòng'
       });
       
+      // Xóa room và tất cả messages
+      await cleanupRoomAndMessages(roomId);
+      console.log(`Cleaned up room ${roomId} and all messages`);
+      
+      // Rời khỏi socket room
       socket.leave(roomId);
+      userRooms.delete(socket.id);
+      
     } catch (error) {
       console.error('Error handling leave room:', error);
     }
